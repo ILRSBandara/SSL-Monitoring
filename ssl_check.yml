@@ -1,0 +1,71 @@
+---
+- name: SSL Check from ServiceNow
+  hosts: localhost
+  gather_facts: no
+
+  vars_files:
+    - vars/main.yml
+
+  tasks:
+
+    # ✅ STEP 1: Get latest RITM
+    - name: Get latest request from ServiceNow
+      uri:
+        url: "{{ snow_url }}/api/now/table/sc_req_item?sysparm_limit=1&sysparm_query=ORDERBYDESCsys_created_on"
+        method: GET
+        user: "{{ snow_user }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: yes
+        return_content: yes
+      register: snow_response
+
+    - name: Show RITM sys_id
+      debug:
+        msg: "RITM sys_id = {{ snow_response.json.result[0].sys_id }}"
+
+    # ✅ STEP 2: Get variable mapping (mtom table)
+    - name: Get variables from ServiceNow
+      uri:
+        url: "{{ snow_url }}/api/now/table/sc_item_option_mtom?sysparm_query=request_item={{ snow_response.json.result[0].sys_id }}"
+        method: GET
+        user: "{{ snow_user }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: yes
+        return_content: yes
+      register: variable_response
+
+    - name: Show variable response
+      debug:
+        var: variable_response.json
+
+    # ✅ STEP 3: Get actual variable value (IMPORTANT FIX ✅)
+    - name: Get actual domain value
+      uri:
+        url: "{{ snow_url }}/api/now/table/sc_item_option/{{ variable_response.json.result[0].sc_item_option.value }}"
+        method: GET
+        user: "{{ snow_user }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: yes
+        return_content: yes
+      register: actual_var
+
+    # ✅ STEP 4: Extract domain correctly
+    - name: Extract domain
+      set_fact:
+        domain: "{{ actual_var.json.result.value }}"
+
+    - name: Show domain
+      debug:
+        msg: "Domain is {{ domain }}"
+
+    # ✅ STEP 5: Get SSL expiry (IMPROVED)
+    - name: Get SSL expiry date
+      shell: |
+        timeout 10 openssl s_client -connect {{ domain }}:443 -servername {{ domain }} < /dev/null 2>/dev/null \
+        | openssl x509 -noout -enddate | cut -d= -f2
+      register: cert_expiry
+
+    # ✅ STEP 6: Show expiry
+    - name: Show expiry date
+      debug:
+        msg: "SSL Expiry Date: {{ cert_expiry.stdout }}"

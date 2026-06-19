@@ -1,0 +1,9 @@
+
+# ServiceNow Configuration
+
+snow_url: "https://nowlearning-nlinst04328268-8asyz-0001.lab.service-now.com"
+snow_user: "admin"
+snow_pass: "6u6YMAJcz3vZ"
+
+# SSL Alert Configuration
+alert_days: 30
