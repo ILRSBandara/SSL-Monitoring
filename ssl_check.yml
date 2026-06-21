@@ -23,7 +23,7 @@
       debug:
         msg: "RITM sys_id = {{ snow_response.json.result[0].sys_id }}"
 
-    # ✅ STEP 2: Get variable mapping (mtom table)
+    # ✅ STEP 2: Get variable mapping
     - name: Get variables from ServiceNow
       uri:
         url: "{{ snow_url }}/api/now/table/sc_item_option_mtom?sysparm_query=request_item={{ snow_response.json.result[0].sys_id }}"
@@ -34,11 +34,7 @@
         return_content: yes
       register: variable_response
 
-    - name: Show variable response
-      debug:
-        var: variable_response.json
-
-    # ✅ STEP 3: Get actual variable value (IMPORTANT FIX ✅)
+    # ✅ STEP 3: Get actual domain value
     - name: Get actual domain value
       uri:
         url: "{{ snow_url }}/api/now/table/sc_item_option/{{ variable_response.json.result[0].sc_item_option.value }}"
@@ -49,7 +45,7 @@
         return_content: yes
       register: actual_var
 
-    # ✅ STEP 4: Extract domain correctly
+    # ✅ STEP 4: Extract domain
     - name: Extract domain
       set_fact:
         domain: "{{ actual_var.json.result.value }}"
@@ -58,14 +54,78 @@
       debug:
         msg: "Domain is {{ domain }}"
 
-    # ✅ STEP 5: Get SSL expiry (IMPROVED)
+    # ✅ STEP 5: Get SSL expiry
     - name: Get SSL expiry date
       shell: |
         timeout 10 openssl s_client -connect {{ domain }}:443 -servername {{ domain }} < /dev/null 2>/dev/null \
         | openssl x509 -noout -enddate | cut -d= -f2
       register: cert_expiry
 
-    # ✅ STEP 6: Show expiry
     - name: Show expiry date
       debug:
         msg: "SSL Expiry Date: {{ cert_expiry.stdout }}"
+
+    # ✅ STEP 6: Convert expiry date to epoch
+    - name: Convert expiry to epoch
+      shell: date -d "{{ cert_expiry.stdout }}" +%s
+      register: expiry_epoch
+
+    - name: Get current epoch
+      shell: date +%s
+      register: current_epoch
+
+    # ✅ STEP 7: Calculate remaining days
+    - name: Calculate remaining days
+      set_fact:
+        remaining_days: "{{ ((expiry_epoch.stdout | int) - (current_epoch.stdout | int)) // 86400 }}"
+
+    - name: Show remaining days
+      debug:
+        msg: "Remaining days: {{ remaining_days }}"
+
+    # ✅ STEP 8: Send email alert ONLY if <= alert_days (30 days)
+    - name: Send email alert
+      mail:
+        host: smtp.gmail.com
+        port: 587
+        username: "{{ smtp_user }}"
+        password: "{{ smtp_pass }}"
+        to: "{{ email_to }}"
+        subject: "SSL Certificate Alert - {{ domain }}"
+        body: |
+          Hello,
+
+          This is an automated SSL certificate status notification.
+
+          ✅ Domain Name     : {{ domain }}
+          ✅ Expiry Date     : {{ cert_expiry.stdout }}
+          ✅ Remaining Days  : {{ remaining_days }}
+
+          ⚠️ WARNING: The SSL certificate will expire within {{ alert_days }} days.
+
+          Please take necessary action to renew it before expiration.
+
+          Regards,
+          Automation Team
+        secure: starttls
+      when: remaining_days | int <= alert_days
+
+    # ✅ STEP 9: Update ServiceNow work notes
+    - name: Update ServiceNow work notes
+      uri:
+        url: "{{ snow_url }}/api/now/table/sc_req_item/{{ snow_response.json.result[0].sys_id }}"
+        method: PATCH
+        user: "{{ snow_user }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: yes
+        headers:
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          state: "3"
+          work_notes: >
+            SSL checked. Expiry: {{ cert_expiry.stdout }}.
+            Remaining days: {{ remaining_days }}.
+            {% if remaining_days|int <= alert_days %}
+            ALERT SENT ✅
+            {% endif %}
