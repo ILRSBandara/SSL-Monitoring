@@ -1,17 +1,17 @@
 ---
-- name: SSL Check from ServiceNow
+- name: Check Nginx SSL certificate expiry from ServiceNow RITM
   hosts: localhost
   gather_facts: no
+  become: false
 
   vars_files:
     - vars/main.yml
 
   tasks:
 
-    # ✅ STEP 1: Get latest RITM
-    - name: Get latest request from ServiceNow
+    - name: Get latest SSL Check RITM from ServiceNow
       uri:
-        url: "{{ snow_url }}/api/now/table/sc_req_item?sysparm_limit=1&sysparm_query=ORDERBYDESCsys_created_on"
+        url: "{{ snow_url }}/api/now/table/sc_req_item?sysparm_limit=1&sysparm_query=cat_item.name=SSL%20Check%5EORDERBYDESCsys_created_on"
         method: GET
         user: "{{ snow_user }}"
         password: "{{ snow_pass }}"
@@ -19,101 +19,132 @@
         return_content: yes
       register: snow_response
 
-    - name: Show RITM sys_id
-      debug:
-        msg: "RITM sys_id = {{ snow_response.json.result[0].sys_id }}"
+    - name: Validate RITM found
+      fail:
+        msg: "No SSL Check RITM found in ServiceNow."
+      when: snow_response.json.result | length == 0
 
-    # ✅ STEP 2: Get variable mapping
-    - name: Get variables from ServiceNow
-      uri:
-        url: "{{ snow_url }}/api/now/table/sc_item_option_mtom?sysparm_query=request_item={{ snow_response.json.result[0].sys_id }}"
-        method: GET
-        user: "{{ snow_user }}"
-        password: "{{ snow_pass }}"
-        force_basic_auth: yes
-        return_content: yes
-      register: variable_response
-
-    # ✅ STEP 3: Get actual domain value
-    - name: Get actual domain value
-      uri:
-        url: "{{ snow_url }}/api/now/table/sc_item_option/{{ variable_response.json.result[0].sc_item_option.value }}"
-        method: GET
-        user: "{{ snow_user }}"
-        password: "{{ snow_pass }}"
-        force_basic_auth: yes
-        return_content: yes
-      register: actual_var
-
-    # ✅ STEP 4: Extract domain
-    - name: Extract domain
+    - name: Set RITM details
       set_fact:
-        domain: "{{ actual_var.json.result.value }}"
+        ritm_sys_id: "{{ snow_response.json.result[0].sys_id }}"
+        ritm_number: "{{ snow_response.json.result[0].number }}"
 
-    - name: Show domain
+    - name: Show selected RITM
       debug:
-        msg: "Domain is {{ domain }}"
+        msg: "Selected RITM: {{ ritm_number }} | Sys ID: {{ ritm_sys_id }}"
 
-    # ✅ STEP 5: Get SSL expiry
-    - name: Get SSL expiry date
+    - name: Get variable mappings for RITM
+      uri:
+        url: "{{ snow_url }}/api/now/table/sc_item_option_mtom?sysparm_query=request_item={{ ritm_sys_id }}"
+        method: GET
+        user: "{{ snow_user }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: yes
+        return_content: yes
+      register: variable_mapping_response
+
+    - name: Initialize variable list
+      set_fact:
+        ritm_variables: []
+
+    - name: Fetch actual variable details
+      uri:
+        url: "{{ snow_url }}/api/now/table/sc_item_option/{{ item.sc_item_option.value }}"
+        method: GET
+        user: "{{ snow_user }}"
+        password: "{{ snow_pass }}"
+        force_basic_auth: yes
+        return_content: yes
+      loop: "{{ variable_mapping_response.json.result }}"
+      register: actual_variable_response
+
+    - name: Store variable values
+      set_fact:
+        ritm_variables: "{{ ritm_variables + [ item.json.result ] }}"
+      loop: "{{ actual_variable_response.results }}"
+
+    - name: Show fetched variables
+      debug:
+        var: ritm_variables
+
+    # This assumes your ServiceNow variables appear in the same order:
+    # 1st variable = Email
+    # 2nd variable = Domain Name/IP
+    - name: Extract email and domain from ServiceNow variables
+      set_fact:
+        domain: "{{ ritm_variables | selectattr('order', 'equalto', '2') | map(attribute='value') | first }}"
+        email_to: "{{ ritm_variables | selectattr('order', 'equalto', '1') | map(attribute='value') | first }}"
+
+    - name: Show extracted values
+      debug:
+        msg:
+          - "Email from ServiceNow: {{ email_to }}"
+          - "Domain/IP from ServiceNow: {{ domain }}"
+
+    - name: Get SSL expiry date from Nginx
       shell: |
         timeout 10 openssl s_client -connect {{ domain }}:443 -servername {{ domain }} < /dev/null 2>/dev/null \
         | openssl x509 -noout -enddate | cut -d= -f2
       register: cert_expiry
+      changed_when: false
 
-    - name: Show expiry date
+    - name: Validate SSL certificate was fetched
+      fail:
+        msg: "Unable to fetch SSL certificate from {{ domain }}:443. Please check Nginx SSL and security group."
+      when: cert_expiry.stdout == ""
+
+    - name: Show SSL expiry date
       debug:
-        msg: "SSL Expiry Date: {{ cert_expiry.stdout }}"
+        msg: "SSL Expiry Date for {{ domain }} is {{ cert_expiry.stdout }}"
 
-    # ✅ STEP 6: Convert expiry date to epoch
-    - name: Convert expiry to epoch
+    - name: Convert expiry date to epoch
       shell: date -d "{{ cert_expiry.stdout }}" +%s
       register: expiry_epoch
+      changed_when: false
 
     - name: Get current epoch
       shell: date +%s
       register: current_epoch
+      changed_when: false
 
-    # ✅ STEP 7: Calculate remaining days
     - name: Calculate remaining days
       set_fact:
         remaining_days: "{{ ((expiry_epoch.stdout | int) - (current_epoch.stdout | int)) // 86400 }}"
 
     - name: Show remaining days
       debug:
-        msg: "Remaining days: {{ remaining_days }}"
+        msg: "Remaining days for {{ domain }} SSL certificate: {{ remaining_days }}"
 
-    # ✅ STEP 8: Send email alert ONLY if <= alert_days (30 days)
-    - name: Send email alert
-      mail:
+    - name: Send SSL expiry email alert
+      community.general.mail:
         host: smtp.gmail.com
         port: 587
         username: "{{ smtp_user }}"
         password: "{{ smtp_pass }}"
         to: "{{ email_to }}"
-        subject: "SSL Certificate Alert - {{ domain }}"
+        subject: "Nginx SSL Certificate Alert - {{ domain }}"
         body: |
           Hello,
 
-          This is an automated SSL certificate status notification.
+          This is an automated SSL certificate expiry notification.
 
-          ✅ Domain Name     : {{ domain }}
-          ✅ Expiry Date     : {{ cert_expiry.stdout }}
-          ✅ Remaining Days  : {{ remaining_days }}
+          RITM Number     : {{ ritm_number }}
+          Domain/IP       : {{ domain }}
+          Expiry Date     : {{ cert_expiry.stdout }}
+          Remaining Days  : {{ remaining_days }}
 
-          ⚠️ WARNING: The SSL certificate will expire within {{ alert_days }} days.
+          The SSL certificate is within the configured threshold of {{ alert_days }} days.
 
-          Please take necessary action to renew it before expiration.
+          Please take necessary action before certificate expiration.
 
           Regards,
           Automation Team
         secure: starttls
       when: remaining_days | int <= alert_days
 
-    # ✅ STEP 9: Update ServiceNow work notes
-    - name: Update ServiceNow work notes
+    - name: Update ServiceNow RITM work notes
       uri:
-        url: "{{ snow_url }}/api/now/table/sc_req_item/{{ snow_response.json.result[0].sys_id }}"
+        url: "{{ snow_url }}/api/now/table/sc_req_item/{{ ritm_sys_id }}"
         method: PATCH
         user: "{{ snow_user }}"
         password: "{{ snow_pass }}"
@@ -122,10 +153,26 @@
           Content-Type: "application/json"
         body_format: json
         body:
-          state: "3"
-          work_notes: >
-            SSL checked. Expiry: {{ cert_expiry.stdout }}.
-            Remaining days: {{ remaining_days }}.
-            {% if remaining_days|int <= alert_days %}
-            ALERT SENT ✅
+          work_notes: |
+            SSL check completed by Ansible automation.
+
+            Domain/IP: {{ domain }}
+            Certificate Expiry Date: {{ cert_expiry.stdout }}
+            Remaining Days: {{ remaining_days }}
+            Alert Threshold: {{ alert_days }} days
+
+            {% if remaining_days | int <= alert_days %}
+            Email alert sent to {{ email_to }}.
+            {% else %}
+            Certificate is valid. No email alert required.
             {% endif %}
+      register: snow_update_response
+
+    - name: Show final status
+      debug:
+        msg:
+          - "SSL check completed."
+          - "RITM updated: {{ ritm_number }}"
+          - "Domain/IP: {{ domain }}"
+          - "Expiry: {{ cert_expiry.stdout }}"
+          - "Remaining days: {{ remaining_days }}"

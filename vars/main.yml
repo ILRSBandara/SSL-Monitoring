@@ -6,7 +6,7 @@ snow_user: "admin"
 snow_pass: "6u6YMAJcz3vZ"
 
 # SSL Alert Configuration
-alert_days: 60
+alert_days: 100
 # Email
 
 email_to: "rashmini.rajida@gmail.com"
