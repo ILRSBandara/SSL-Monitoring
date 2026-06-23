@@ -1,14 +1,13 @@
-
+---
 # ServiceNow Configuration
-
-snow_url: "https://nowlearning-nlinst04328268-8asyz-0001.lab.service-now.com"
+snow_url: "https://nowlearning-nlinst04341981-5r4na-0001.lab.service-now.com"
 snow_user: "admin"
-snow_pass: "6u6YMAJcz3vZ"
+snow_pass: "84mBSMWWQEZj"
 
 # SSL Alert Configuration
 alert_days: 100
-# Email
 
+# Email Configuration
 email_to: "rashmini.rajida@gmail.com"
 smtp_user: "rashmini.rajida@gmail.com"
 smtp_pass: "wtfjhimcecnzaleo"
